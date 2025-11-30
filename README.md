@@ -4,6 +4,27 @@ A plugin for [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) that fixe
 
 **GitHub Repository:** https://github.com/cedric-marcoux/dispatcharr_vod_fix
 
+---
+
+## ⚠️ IMPORTANT: Installation from GitHub
+
+When downloading this plugin from GitHub (via "Download ZIP"), the folder will be named `dispatcharr_vod_fix-main` (GitHub adds `-main` suffix for the main branch).
+
+**You MUST rename it to `dispatcharr_vod_fix`** for the plugin to load correctly:
+
+```bash
+# After extracting the ZIP to your plugins directory:
+cd /path/to/dispatcharr/data/plugins/
+mv dispatcharr_vod_fix-main dispatcharr_vod_fix
+
+# Then restart Dispatcharr
+docker compose restart dispatcharr
+```
+
+If you don't rename the folder, the plugin **will not load** and you'll still see "All profiles at capacity" errors.
+
+---
+
 ## Related Issues
 
 This plugin addresses the following Dispatcharr issues:
