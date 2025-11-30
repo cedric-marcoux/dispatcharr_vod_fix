@@ -172,6 +172,10 @@ The plugin logs with prefix `[VOD-Fix]`:
 
 # Cleanup when all requests complete
 [VOD-Fix] All requests done for 192.168.1.100/abc123..., decremented profile 3
+
+# Orphan counter detection and automatic cleanup (v1.1.0+)
+[VOD-Fix] Orphan counter detected for profile 3: counter=1, active_slots=0. Resetting to 0.
+[VOD-Fix] Orphan counter cleaned, retrying profile selection
 ```
 
 ## Troubleshooting
@@ -201,12 +205,14 @@ docker compose restart dispatcharr
 
 ### Ghost connections
 
-If `profile_connections` counter is stuck at a non-zero value with no active streams:
+**As of v1.1.0**, the plugin automatically detects and resets orphan counters. If a profile appears "at capacity" but no active slots exist, the counter is automatically reset before rejecting the request.
+
+If you still experience issues, you can manually check and reset:
 ```bash
 # Check current value
 docker exec dispatcharr redis-cli GET "profile_connections:3"
 
-# Reset to 0
+# Manual reset (usually not needed with v1.1.0+)
 docker exec dispatcharr redis-cli SET "profile_connections:3" "0"
 
 # Check for orphaned slots
@@ -239,7 +245,15 @@ dispatcharr_vod_fix/
 
 ## Version History
 
-### 1.0.0 (2024-11-30)
+### 1.1.0 (2025-11-30)
+- **Automatic orphan counter cleanup**: When a profile appears "at capacity" but no active slots exist, the plugin now automatically detects and resets stuck counters
+  - This fixes issues where abrupt client disconnects (app crash, network failure, TCP reset) leave the `profile_connections` counter stuck at a non-zero value
+  - Previously required manual intervention via `redis-cli SET profile_connections:X 0`
+  - Now the plugin scans Redis for active slots and resets orphan counters automatically before rejecting requests
+- Added `count_active_slots_for_profile()` function to scan Redis slots
+- Added `cleanup_orphan_counter()` function for automatic counter recovery
+
+### 1.0.0 (2025-11-30)
 - Initial release
 - Fixes TiviMate VOD playback with multi-Range request handling
 - Tracks connections by client+content instead of per-request

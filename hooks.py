@@ -126,6 +126,140 @@ SLOT_TTL_SECONDS = 300  # 5 minutes
 
 
 # =============================================================================
+# ORPHAN CLEANUP FUNCTIONS
+# =============================================================================
+
+def count_active_slots_for_profile(profile_id: int) -> int:
+    """
+    Count the number of active client slots for a given profile.
+
+    This function scans all VOD client slots in Redis and counts how many
+    are associated with the specified profile AND have active_requests > 0.
+
+    This is used to detect "orphan" profile_connections counters - where the
+    counter shows connections but no actual slots exist (due to abrupt client
+    disconnects, crashes, etc.).
+
+    Args:
+        profile_id: The M3U profile ID to count slots for
+
+    Returns:
+        int: Number of active slots for this profile
+
+    Example:
+        >>> count = count_active_slots_for_profile(3)
+        >>> if count == 0:
+        ...     print("No active slots - counter may be orphaned")
+    """
+    redis_client = get_redis_client()
+    if not redis_client:
+        return -1  # Return -1 to indicate we couldn't check
+
+    try:
+        count = 0
+        profile_id_str = str(profile_id)
+
+        # Scan for all client slot keys
+        # Using SCAN is safer than KEYS for large datasets
+        for key in redis_client.scan_iter(f"{CLIENT_TRACKING_PREFIX}*"):
+            try:
+                slot_data = redis_client.hgetall(key)
+                if not slot_data:
+                    continue
+
+                # Decode bytes to strings if needed
+                slot_profile = slot_data.get(b'profile_id') or slot_data.get('profile_id')
+                slot_active = slot_data.get(b'active_requests') or slot_data.get('active_requests')
+
+                if slot_profile:
+                    slot_profile_str = (
+                        slot_profile.decode('utf-8')
+                        if isinstance(slot_profile, bytes)
+                        else str(slot_profile)
+                    )
+
+                    if slot_profile_str == profile_id_str:
+                        # This slot is for our profile, check if it's active
+                        active_requests = 0
+                        if slot_active:
+                            active_str = (
+                                slot_active.decode('utf-8')
+                                if isinstance(slot_active, bytes)
+                                else str(slot_active)
+                            )
+                            active_requests = int(active_str)
+
+                        if active_requests > 0:
+                            count += 1
+
+            except Exception as e:
+                logger.debug(f"[VOD-Fix] Error checking slot {key}: {e}")
+                continue
+
+        return count
+
+    except Exception as e:
+        logger.error(f"[VOD-Fix] Error counting active slots: {e}")
+        return -1
+
+
+def cleanup_orphan_counter(profile_id: int) -> bool:
+    """
+    Check and reset an orphaned profile_connections counter.
+
+    An "orphan" counter occurs when:
+    - profile_connections shows a value > 0
+    - But no active client slots exist for that profile
+
+    This happens when clients disconnect abruptly (TCP reset, app crash, etc.)
+    and the decrement callback never fires.
+
+    Args:
+        profile_id: The M3U profile ID to check/reset
+
+    Returns:
+        bool: True if counter was reset, False if counter is valid or couldn't check
+
+    Example:
+        >>> if cleanup_orphan_counter(3):
+        ...     print("Orphan counter was reset!")
+    """
+    redis_client = get_redis_client()
+    if not redis_client:
+        return False
+
+    try:
+        profile_connections_key = f"profile_connections:{profile_id}"
+        current_count = int(redis_client.get(profile_connections_key) or 0)
+
+        if current_count <= 0:
+            # Counter is already at 0, nothing to clean
+            return False
+
+        # Count actual active slots for this profile
+        active_slots = count_active_slots_for_profile(profile_id)
+
+        if active_slots == -1:
+            # Couldn't check, don't modify
+            return False
+
+        if active_slots == 0 and current_count > 0:
+            # ORPHAN DETECTED: Counter shows connections but no slots exist
+            logger.warning(
+                f"[VOD-Fix] Orphan counter detected for profile {profile_id}: "
+                f"counter={current_count}, active_slots={active_slots}. Resetting to 0."
+            )
+            redis_client.set(profile_connections_key, "0")
+            return True
+
+        return False
+
+    except Exception as e:
+        logger.error(f"[VOD-Fix] Error in cleanup_orphan_counter: {e}")
+        return False
+
+
+# =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
 
@@ -593,6 +727,44 @@ def patched_get_m3u_profile(self, m3u_account, profile_id, session_id=None):
             self._vod_fix_context['client_ip'] = client_ip
             self._vod_fix_context['content_uuid'] = content_uuid
             self._vod_fix_context['reusing_slot'] = False
+
+        elif result is None:
+            # ---------------------------------------------------------------------
+            # Profile returned None - possibly "at capacity"
+            # Check for orphan counters and retry if found
+            # ---------------------------------------------------------------------
+            # Get all profiles for this account and check each for orphans
+            try:
+                from apps.m3u.models import M3UAccountProfile
+                profiles = M3UAccountProfile.objects.filter(
+                    m3u_account=m3u_account,
+                    is_active=True
+                )
+
+                orphan_cleaned = False
+                for profile in profiles:
+                    if cleanup_orphan_counter(profile.id):
+                        orphan_cleaned = True
+
+                if orphan_cleaned:
+                    # Orphan counter was reset - retry profile selection
+                    logger.info("[VOD-Fix] Orphan counter cleaned, retrying profile selection")
+                    result = _original_get_m3u_profile(self, m3u_account, profile_id, session_id)
+
+                    if result and result[0]:
+                        profile = result[0]
+                        # Create new slot for this client+content
+                        create_or_update_slot(client_ip, content_uuid, profile.id, increment_active=True)
+
+                        # Store context for increment/decrement patches
+                        if not hasattr(self, '_vod_fix_context'):
+                            self._vod_fix_context = {}
+                        self._vod_fix_context['client_ip'] = client_ip
+                        self._vod_fix_context['content_uuid'] = content_uuid
+                        self._vod_fix_context['reusing_slot'] = False
+
+            except Exception as e:
+                logger.error(f"[VOD-Fix] Error checking for orphan counters: {e}")
 
         return result
 
