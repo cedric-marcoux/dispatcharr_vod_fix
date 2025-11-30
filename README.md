@@ -1,0 +1,245 @@
+# Dispatcharr VOD Fix
+
+A plugin for [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) that fixes VOD (Video on Demand) playback issues with TiviMate and other Android IPTV clients.
+
+**GitHub Repository:** https://github.com/cedric-marcoux/dispatcharr_vod_fix
+
+## Related Issues
+
+This plugin addresses the following Dispatcharr issues:
+
+- **[#451 - VOD not working with TiviMate](https://github.com/Dispatcharr/Dispatcharr/issues/451)** - TiviMate makes multiple simultaneous Range requests, causing "All profiles at capacity" errors
+- **[#533 - Connection counting for VOD streams](https://github.com/Dispatcharr/Dispatcharr/issues/533)** - Provider connections are counted per HTTP request instead of per actual stream
+
+## The Problem
+
+TiviMate and similar Android clients make **multiple simultaneous HTTP Range requests** when playing MKV/VOD files:
+
+```
+Request 1: GET /movie/uuid           (no Range)      → Probe file size/metadata
+Request 2: GET /movie/uuid           (Range: bytes=X-) → Read metadata at EOF
+Request 3: GET /movie/uuid           (Range: bytes=Y-) → Actual playback start
+```
+
+Dispatcharr counts **each HTTP request** as a separate provider connection, incrementing the `profile_connections` counter in Redis. With `max_streams=1`, the 2nd and 3rd requests are rejected with "All profiles at capacity" before the first request even completes.
+
+**Symptoms:**
+- VOD/Movies work on Apple TV (iPlayTV) but fail on Android (TiviMate)
+- Error in logs: `[PROFILE-SELECTION] All profiles at capacity for M3U account`
+- Movies start loading then immediately fail
+- Connection counter shows more connections than actual streams
+
+## The Solution
+
+This plugin tracks VOD connections by **client IP + content UUID** instead of per-HTTP-request. Multiple Range requests from the same client for the same content share a single connection slot.
+
+### How It Works
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  TiviMate   │     │ Dispatcharr │     │   Provider  │
+│  (Client)   │     │   (Proxy)   │     │  (900900.eu)│
+└──────┬──────┘     └──────┬──────┘     └──────┬──────┘
+       │                   │                   │
+       │ Request 1 (probe) │                   │
+       │──────────────────>│                   │
+       │                   │ Create slot       │
+       │                   │ profile_conn: 1   │
+       │                   │──────────────────>│
+       │                   │                   │
+       │ Request 2 (meta)  │                   │
+       │──────────────────>│                   │
+       │                   │ REUSE slot        │
+       │                   │ (skip increment)  │
+       │                   │──────────────────>│
+       │                   │                   │
+       │ Request 3 (play)  │                   │
+       │──────────────────>│                   │
+       │                   │ REUSE slot        │
+       │                   │ (skip increment)  │
+       │                   │<─────────────────>│
+       │<─────────────────>│   Stream data     │
+       │   Stream data     │                   │
+```
+
+1. **Slot Creation**: When a client requests VOD content, a "slot" is created in Redis with a 10-second grace period
+2. **Slot Reuse**: Subsequent requests from the same client for the same content reuse the existing slot
+3. **Single Count**: Only the first request increments the provider connection counter
+4. **Smart Cleanup**: The connection is only decremented when all requests for that slot are complete
+
+## Installation
+
+1. Copy the `dispatcharr_vod_fix` folder to your Dispatcharr plugins directory:
+   ```
+   /data/plugins/dispatcharr_vod_fix/
+   ```
+
+2. Set correct permissions (if needed):
+   ```bash
+   chmod 644 /data/plugins/dispatcharr_vod_fix/*.py
+   chown 1000:1000 /data/plugins/dispatcharr_vod_fix/*
+   ```
+
+3. Restart Dispatcharr:
+   ```bash
+   docker compose restart dispatcharr
+   ```
+
+4. The plugin auto-installs on startup. Check logs for:
+   ```
+   [VOD-Fix] Installing VOD connection hooks...
+   [VOD-Fix] All hooks installed successfully
+   [VOD-Fix] Hooks installed (will check enabled state at runtime)
+   ```
+
+## Configuration
+
+No configuration required. The plugin works automatically once installed.
+
+## Compatibility
+
+- **Dispatcharr**: Tested with latest version
+- **Clients**: TiviMate, and other Android IPTV clients that make multiple Range requests
+- **Content Types**: Movies (VOD) via `/proxy/vod/movie/` endpoints
+
+## Technical Details
+
+### Redis Keys
+
+| Key | Purpose | TTL |
+|-----|---------|-----|
+| `vod_client_slot:{ip}:{content_uuid}` | Tracks client+content → profile mapping | 300s |
+
+### Slot Data Structure
+
+```json
+{
+  "profile_id": "3",
+  "created_at": "1234567890.123",
+  "last_activity": "1234567890.456",
+  "active_requests": "2",
+  "counted": "1"
+}
+```
+
+### Patched Functions
+
+| Function | Original Behavior | Patched Behavior |
+|----------|------------------|------------------|
+| `VODStreamView._get_m3u_profile()` | Checks profile capacity | First checks for existing client slot |
+| `MultiWorkerVODConnectionManager._increment_profile_connections()` | Always increments counter | Skips if slot already counted |
+| `MultiWorkerVODConnectionManager._decrement_profile_connections()` | Always decrements counter | Only decrements when all requests done |
+| `MultiWorkerVODConnectionManager.stream_content_with_session()` | Streams content | Stores client context for patches |
+
+### Grace Period
+
+The plugin uses a 10-second grace period (`GRACE_PERIOD_SECONDS = 10.0`). Requests within this window of slot creation are allowed to reuse the slot, even if `active_requests` is temporarily 0 (handles race conditions).
+
+## Logs
+
+The plugin logs with prefix `[VOD-Fix]`:
+
+```
+# Slot creation
+[VOD-Fix] Created slot for 192.168.1.100/abc123..., profile 3
+
+# Slot reuse (subsequent requests)
+[VOD-Fix] Client 192.168.1.100 reusing slot for abc123... - profile 3, active: 2
+
+# Skip duplicate increment
+[VOD-Fix] Skipping increment for 192.168.1.100/abc123... - already counted, current: 1
+
+# Cleanup when all requests complete
+[VOD-Fix] All requests done for 192.168.1.100/abc123..., decremented profile 3
+```
+
+## Troubleshooting
+
+### Plugin not loading
+
+Check file permissions:
+```bash
+chmod 644 /data/plugins/dispatcharr_vod_fix/*.py
+chown 1000:1000 /data/plugins/dispatcharr_vod_fix/*
+docker compose restart dispatcharr
+```
+
+### VOD still failing
+
+1. Check if plugin is loaded in logs:
+   ```bash
+   docker compose logs dispatcharr | grep "VOD-Fix"
+   ```
+
+2. Reset stuck connection counter:
+   ```bash
+   docker exec dispatcharr redis-cli SET "profile_connections:3" "0"
+   ```
+
+3. Verify the content uses `/proxy/vod/movie/` endpoint (Series use different endpoints)
+
+### Ghost connections
+
+If `profile_connections` counter is stuck at a non-zero value with no active streams:
+```bash
+# Check current value
+docker exec dispatcharr redis-cli GET "profile_connections:3"
+
+# Reset to 0
+docker exec dispatcharr redis-cli SET "profile_connections:3" "0"
+
+# Check for orphaned slots
+docker exec dispatcharr redis-cli KEYS "vod_client_slot:*"
+
+# Delete orphaned slots (if any)
+docker exec dispatcharr redis-cli DEL "vod_client_slot:192.168.1.100:abc123"
+```
+
+### Debug logging
+
+To see detailed debug logs, set Dispatcharr's log level to DEBUG in your configuration.
+
+## Known Limitations
+
+- Only fixes **Movies (VOD)** via `/proxy/vod/movie/` endpoints
+- Series/Episodes use different endpoints (`/series/`) which are not patched by this plugin
+- Grace period is fixed at 10 seconds (not configurable via UI)
+- Slot TTL is fixed at 300 seconds (5 minutes)
+
+## File Structure
+
+```
+dispatcharr_vod_fix/
+├── __init__.py      # Package marker and exports
+├── plugin.py        # Plugin metadata and auto-install logic
+├── hooks.py         # Monkey-patches for VOD connection handling
+└── README.md        # This documentation
+```
+
+## Version History
+
+### 1.0.0 (2024-11-30)
+- Initial release
+- Fixes TiviMate VOD playback with multi-Range request handling
+- Tracks connections by client+content instead of per-request
+- Implements connection slot system with Redis
+- Auto-installs on Dispatcharr startup
+
+## Contributing
+
+Issues and pull requests are welcome at:
+https://github.com/cedric-marcoux/dispatcharr_vod_fix
+
+## Author
+
+**Cedric Marcoux**
+- GitHub: https://github.com/cedric-marcoux
+
+## License
+
+MIT License - Feel free to use and modify.
+
+## Acknowledgments
+
+- [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) - The IPTV proxy this plugin extends
+- Related issues: [#451](https://github.com/Dispatcharr/Dispatcharr/issues/451), [#533](https://github.com/Dispatcharr/Dispatcharr/issues/533)
