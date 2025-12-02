@@ -8,16 +8,26 @@ A plugin for [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) that fixe
 
 ## ⚠️ IMPORTANT: Installation from GitHub
 
-When downloading this plugin from GitHub (via "Download ZIP"), the folder will be named `dispatcharr_vod_fix-main` (GitHub adds `-main` suffix for the main branch).
+When downloading this plugin from GitHub (via "Download ZIP"), the file will be named `dispatcharr_vod_fix-main.zip` (GitHub adds `-main` suffix for the main branch).
 
-**You MUST rename it to `dispatcharr_vod_fix`** for the plugin to load correctly:
+### Recommended Method: WebUI Import
+
+1. **Rename the ZIP file** from `dispatcharr_vod_fix-main.zip` to `dispatcharr_vod_fix.zip`
+2. Go to Dispatcharr **Settings → Plugins**
+3. Click **Import** and select your renamed ZIP file
+4. **Enable** the plugin after import
+
+The WebUI import handles file permissions automatically.
+
+### Manual Method (Advanced)
+
+If you extract files directly to the plugins directory, you **MUST** manage file permissions yourself:
 
 ```bash
-# After extracting the ZIP to your plugins directory:
 cd /path/to/dispatcharr/data/plugins/
 mv dispatcharr_vod_fix-main dispatcharr_vod_fix
-
-# Then restart Dispatcharr
+chmod 644 dispatcharr_vod_fix/*.py
+chown 1000:1000 dispatcharr_vod_fix/*
 docker compose restart dispatcharr
 ```
 
