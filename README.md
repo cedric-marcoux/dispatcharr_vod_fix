@@ -129,9 +129,9 @@ No configuration required. The plugin works automatically once installed.
 
 ## Compatibility
 
-- **Dispatcharr**: Tested with latest version
-- **Clients**: TiviMate, and other Android IPTV clients that make multiple Range requests
-- **Content Types**: Movies (VOD) via `/proxy/vod/movie/` endpoints
+- **Dispatcharr**: Tested with v0.12 and v0.13
+- **Clients**: TiviMate (Android), iPlayTV (Apple TV), UHF, Snappier iOS, and other Xtream Codes compatible clients
+- **Content Types**: Movies (VOD) via `/proxy/vod/movie/` endpoints, Series via Xtream Codes API
 
 ## Technical Details
 
@@ -161,6 +161,8 @@ No configuration required. The plugin works automatically once installed.
 | `MultiWorkerVODConnectionManager._increment_profile_connections()` | Always increments counter | Skips if slot already counted |
 | `MultiWorkerVODConnectionManager._decrement_profile_connections()` | Always decrements counter | Only decrements when all requests done |
 | `MultiWorkerVODConnectionManager.stream_content_with_session()` | Streams content | Stores client context for patches |
+| `apps.output.views.xc_series_stream()` | Uses `.get()` (fails with multiple) | Looks up by `stream_id` first, fallback to `episode_id` |
+| `apps.output.views.xc_get_series_info()` | Returns internal IDs, allows nulls | Replaces IDs with provider stream_ids, sanitizes nulls |
 
 ### Grace Period
 
@@ -238,8 +240,6 @@ To see detailed debug logs, set Dispatcharr's log level to DEBUG in your configu
 
 ## Known Limitations
 
-- Only fixes **Movies (VOD)** via `/proxy/vod/movie/` endpoints
-- Series/Episodes use different endpoints (`/series/`) which are not patched by this plugin
 - Grace period is fixed at 10 seconds (not configurable via UI)
 - Slot TTL is fixed at 300 seconds (5 minutes)
 
@@ -254,6 +254,25 @@ dispatcharr_vod_fix/
 ```
 
 ## Version History
+
+### 1.3.0 (2025-12-06)
+- **Fix iPlayTV series playback crash**: iPlayTV crashed when loading episode lists due to two issues in Dispatcharr v0.13:
+  1. **Episode ID mismatch**: Dispatcharr returns internal episode IDs (e.g., `774`) but clients expect the provider's stream_id (e.g., `1259857`). When iPlayTV builds the playback URL `/series/user/pass/1259857.mkv`, Dispatcharr couldn't find the episode.
+  2. **Null values in JSON**: Fields like `custom_sid`, `direct_source` returned `null` instead of empty strings, causing strict JSON parsers (iPlayTV) to crash.
+- Added `patched_xc_get_series_info()` function:
+  - Replaces internal episode IDs with provider's `stream_id` from `M3UEpisodeRelation`
+  - Sanitizes `null` values to empty strings for iPlayTV compatibility
+- Modified `patched_xc_series_stream()` to lookup episodes by `stream_id` field first, with fallback to internal `episode_id`
+- Series now work on all clients: iPlayTV, UHF, Snappier iOS, TiviMate
+
+### 1.2.0 (2025-12-06)
+- **Fix series streaming with multiple M3U accounts**: Fixes `MultipleObjectsReturned` error when an episode exists in multiple M3U accounts
+  - Error: `apps.vod.models.M3UEpisodeRelation.MultipleObjectsReturned: get() returned more than one M3UEpisodeRelation -- it returned 2!`
+  - This is a bug in Dispatcharr v0.13's `xc_series_stream` function which uses `.get()` instead of `.first()`
+  - The patched version uses `.first()` ordered by M3U account priority to select the best source
+  - Now series episodes play correctly even when available from multiple providers
+- Added `patched_xc_series_stream()` function to fix the bug
+- Improved logging when selecting from multiple sources
 
 ### 1.1.0 (2025-11-30)
 - **Automatic orphan counter cleanup**: When a profile appears "at capacity" but no active slots exist, the plugin now automatically detects and resets stuck counters

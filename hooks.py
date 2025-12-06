@@ -106,6 +106,8 @@ _original_get_m3u_profile = None      # VODStreamView._get_m3u_profile
 _original_increment = None             # MultiWorkerVODConnectionManager._increment_profile_connections
 _original_decrement = None             # MultiWorkerVODConnectionManager._decrement_profile_connections
 _original_stream_content = None        # MultiWorkerVODConnectionManager.stream_content_with_session
+_original_xc_series_stream = None      # apps.output.views.xc_series_stream
+_original_xc_get_series_info = None    # apps.output.views.xc_get_series_info
 
 # =============================================================================
 # CONFIGURATION CONSTANTS
@@ -326,6 +328,7 @@ def install_hooks() -> bool:
         - MultiWorkerVODConnectionManager._decrement_profile_connections
         - MultiWorkerVODConnectionManager.stream_content_with_session
         - MultiWorkerVODConnectionManager._check_profile_limits
+        - apps.output.views.xc_series_stream (fix MultipleObjectsReturned bug)
 
     Returns:
         bool: True if all hooks installed successfully, False otherwise.
@@ -347,7 +350,7 @@ def install_hooks() -> bool:
         ...     print("Failed to install VOD Fix hooks")
     """
     global _original_increment, _original_decrement, _original_stream_content
-    global _original_get_m3u_profile
+    global _original_get_m3u_profile, _original_xc_series_stream, _original_xc_get_series_info
 
     logger.info("[VOD-Fix] Installing VOD connection hooks...")
 
@@ -382,6 +385,34 @@ def install_hooks() -> bool:
         MultiWorkerVODConnectionManager._check_profile_limits = patched_check_profile_limits
         VODStreamView._get_m3u_profile = patched_get_m3u_profile
 
+        # ---------------------------------------------------------------------
+        # Patch xc_series_stream to fix MultipleObjectsReturned bug
+        # ---------------------------------------------------------------------
+        try:
+            import apps.output.views as output_views
+            _original_xc_series_stream = output_views.xc_series_stream
+            output_views.xc_series_stream = patched_xc_series_stream
+
+            # Also patch URL patterns that reference xc_series_stream
+            from django.urls import get_resolver
+            resolver = get_resolver()
+            _patch_url_patterns_for_xc_series_stream(resolver.url_patterns, output_views)
+
+            logger.info("[VOD-Fix] Patched xc_series_stream for MultipleObjectsReturned fix")
+        except Exception as e:
+            logger.warning(f"[VOD-Fix] Could not patch xc_series_stream: {e}")
+
+        # ---------------------------------------------------------------------
+        # Patch xc_get_series_info to fix null values causing iPlayTV crash
+        # ---------------------------------------------------------------------
+        try:
+            import apps.output.views as output_views
+            _original_xc_get_series_info = output_views.xc_get_series_info
+            output_views.xc_get_series_info = patched_xc_get_series_info
+            logger.info("[VOD-Fix] Patched xc_get_series_info for null value fix")
+        except Exception as e:
+            logger.warning(f"[VOD-Fix] Could not patch xc_get_series_info: {e}")
+
         logger.info("[VOD-Fix] All hooks installed successfully")
         return True
 
@@ -390,6 +421,26 @@ def install_hooks() -> bool:
         import traceback
         traceback.print_exc()
         return False
+
+
+def _patch_url_patterns_for_xc_series_stream(urlpatterns, output_views):
+    """
+    Recursively patch URL patterns that reference xc_series_stream.
+
+    Django caches function references at import time, so we need to update
+    the pattern.callback directly.
+    """
+    global _original_xc_series_stream
+
+    for pattern in urlpatterns:
+        if hasattr(pattern, 'url_patterns'):
+            # This is a URLResolver, recurse into it
+            _patch_url_patterns_for_xc_series_stream(pattern.url_patterns, output_views)
+        elif hasattr(pattern, 'callback'):
+            # This is a URLPattern
+            if pattern.callback == _original_xc_series_stream:
+                pattern.callback = patched_xc_series_stream
+                logger.debug(f"[VOD-Fix] Patched URL pattern: {pattern.name}")
 
 
 def uninstall_hooks() -> bool:
@@ -415,7 +466,7 @@ def uninstall_hooks() -> bool:
         True
     """
     global _original_get_m3u_profile, _original_increment
-    global _original_decrement, _original_stream_content
+    global _original_decrement, _original_stream_content, _original_xc_series_stream
 
     try:
         from apps.proxy.vod_proxy.views import VODStreamView
@@ -438,6 +489,11 @@ def uninstall_hooks() -> bool:
             MultiWorkerVODConnectionManager._check_profile_limits = (
                 MultiWorkerVODConnectionManager._original_check_profile_limits
             )
+
+        # Restore xc_series_stream
+        if _original_xc_series_stream:
+            import apps.output.views as output_views
+            output_views.xc_series_stream = _original_xc_series_stream
 
         logger.info("[VOD-Fix] Hooks uninstalled successfully")
         return True
@@ -1029,3 +1085,199 @@ def patched_decrement_profile_connections(self, m3u_profile_id: int):
     except Exception as e:
         logger.error(f"[VOD-Fix] Error in patched_decrement: {e}")
         return _original_decrement(self, m3u_profile_id)
+
+
+def patched_xc_series_stream(request, username, password, stream_id, extension):
+    """
+    Patched version of xc_series_stream that fixes MultipleObjectsReturned bug.
+
+    The original function uses .get() which fails when an episode exists in
+    multiple M3U accounts. This patched version uses .first() instead and
+    orders by M3U account priority to get the best source.
+
+    Bug fixed:
+        apps.vod.models.M3UEpisodeRelation.MultipleObjectsReturned:
+        get() returned more than one M3UEpisodeRelation -- it returned 2!
+
+    Args:
+        request: Django HttpRequest object
+        username: XC API username
+        password: XC API password (xc_password from user's custom_properties)
+        stream_id: Provider's episode/stream ID
+        extension: File extension (e.g., 'mkv', 'mp4')
+
+    Returns:
+        HttpResponseRedirect to VOD proxy endpoint, or JsonResponse with error
+    """
+    from django.shortcuts import get_object_or_404
+    from django.http import JsonResponse, HttpResponseRedirect
+    from django.urls import reverse
+    from django.contrib.auth import get_user_model
+    from apps.vod.models import M3UEpisodeRelation
+
+    User = get_user_model()
+    user = get_object_or_404(User, username=username)
+
+    custom_properties = user.custom_properties or {}
+
+    if "xc_password" not in custom_properties:
+        logger.warning(f"[VOD-Fix] xc_series_stream: User {username} has no xc_password")
+        return JsonResponse({"error": "Invalid credentials"}, status=401)
+
+    if custom_properties["xc_password"] != password:
+        logger.warning(f"[VOD-Fix] xc_series_stream: Invalid password for user {username}")
+        return JsonResponse({"error": "Invalid credentials"}, status=401)
+
+    # FIX: Look up by stream_id (provider's ID) instead of episode_id (internal ID)
+    # Also use .first() instead of .get() to handle multiple relations
+    # Order by M3U account priority (descending) to get the best source
+
+    try:
+        # First try to find by stream_id (provider's ID)
+        episode_relation = (
+            M3UEpisodeRelation.objects
+            .select_related('episode', 'm3u_account')
+            .filter(stream_id=stream_id, m3u_account__is_active=True)
+            .order_by('-m3u_account__priority', 'id')
+            .first()
+        )
+
+        # Fallback: try by internal episode_id
+        if not episode_relation:
+            episode_relation = (
+                M3UEpisodeRelation.objects
+                .select_related('episode', 'm3u_account')
+                .filter(episode_id=stream_id, m3u_account__is_active=True)
+                .order_by('-m3u_account__priority', 'id')
+                .first()
+            )
+
+        if not episode_relation:
+            logger.warning(
+                f"[VOD-Fix] xc_series_stream: Episode not found for stream_id={stream_id}, "
+                f"user={username}. Checked: stream_id lookup, episode_id fallback."
+            )
+            return JsonResponse({"error": "Episode not found"}, status=404)
+
+        # Log which account was selected when there are multiple
+        relation_count = M3UEpisodeRelation.objects.filter(
+            stream_id=stream_id, m3u_account__is_active=True
+        ).count()
+        if relation_count > 1:
+            logger.info(
+                f"[VOD-Fix] xc_series_stream: Found {relation_count} relations for "
+                f"stream_id={stream_id}, using account '{episode_relation.m3u_account.name}' "
+                f"(priority: {episode_relation.m3u_account.priority})"
+            )
+
+        # Redirect to the VOD proxy endpoint
+        vod_url = reverse('proxy:vod_proxy:vod_stream', kwargs={
+            'content_type': 'episode',
+            'content_id': episode_relation.episode.uuid
+        })
+
+        logger.debug(
+            f"[VOD-Fix] xc_series_stream: Redirecting stream_id={stream_id} "
+            f"to {vod_url}"
+        )
+
+        return HttpResponseRedirect(vod_url)
+
+    except Exception as e:
+        logger.error(f"[VOD-Fix] xc_series_stream error: {e}")
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({"error": "Internal server error"}, status=500)
+
+
+def patched_xc_get_series_info(request, user, series_id):
+    """
+    Patched version of xc_get_series_info that:
+    1. Converts null values to empty strings (fixes iPlayTV crash)
+    2. Replaces internal episode IDs with provider stream_ids (fixes playback)
+
+    Args:
+        request: Django HttpRequest object
+        user: Django User object
+        series_id: Series ID to get info for
+
+    Returns:
+        dict with sanitized data
+    """
+    from apps.vod.models import M3UEpisodeRelation
+
+    # DEBUG: Log the request
+    user_agent = request.META.get('HTTP_USER_AGENT', 'unknown')
+    logger.info(f"[VOD-Fix] get_series_info called: series_id={series_id}, user={user.username}, UA={user_agent[:30]}")
+
+    # Call the original function (returns a dict, not a Response)
+    data = _original_xc_get_series_info(request, user, series_id)
+
+    # DEBUG: Log response structure
+    episodes_dict = data.get('episodes', {})
+    total_eps = sum(len(v) for v in episodes_dict.values()) if isinstance(episodes_dict, dict) else 0
+    seasons_count = len(data.get('seasons', []))
+    logger.info(f"[VOD-Fix] get_series_info response: {seasons_count} seasons, {total_eps} episodes")
+
+    try:
+        nulls_fixed = 0
+        ids_fixed = 0
+
+        # Build a mapping of internal episode ID -> provider stream_id
+        episode_ids = []
+        if 'episodes' in data and isinstance(data['episodes'], dict):
+            for season, episodes in data['episodes'].items():
+                if isinstance(episodes, list):
+                    for episode in episodes:
+                        if isinstance(episode, dict) and 'id' in episode:
+                            episode_ids.append(episode['id'])
+
+        # Query for stream_ids
+        id_to_stream_id = {}
+        if episode_ids:
+            relations = M3UEpisodeRelation.objects.filter(
+                episode_id__in=episode_ids,
+                m3u_account__is_active=True
+            ).values('episode_id', 'stream_id')
+            for rel in relations:
+                # Use first found stream_id for each episode
+                if rel['episode_id'] not in id_to_stream_id:
+                    id_to_stream_id[rel['episode_id']] = rel['stream_id']
+
+        # Sanitize and fix IDs
+        if 'episodes' in data and isinstance(data['episodes'], dict):
+            for season, episodes in data['episodes'].items():
+                if isinstance(episodes, list):
+                    for episode in episodes:
+                        if isinstance(episode, dict):
+                            # Fix ID: replace internal ID with provider stream_id
+                            internal_id = episode.get('id')
+                            if internal_id and internal_id in id_to_stream_id:
+                                provider_id = id_to_stream_id[internal_id]
+                                episode['id'] = provider_id
+                                ids_fixed += 1
+                                # Also fix nested info.id
+                                if 'info' in episode and isinstance(episode['info'], dict):
+                                    episode['info']['id'] = provider_id
+
+                            # Convert null values to empty strings for string fields
+                            for key in ['custom_sid', 'direct_source', 'title', 'container_extension']:
+                                if key in episode and episode[key] is None:
+                                    episode[key] = ""
+                                    nulls_fixed += 1
+
+                            # Also sanitize nested 'info' dict
+                            if 'info' in episode and isinstance(episode['info'], dict):
+                                for key, value in episode['info'].items():
+                                    if value is None:
+                                        episode['info'][key] = ""
+                                        nulls_fixed += 1
+
+        logger.info(f"[VOD-Fix] get_series_info: fixed {ids_fixed} IDs, sanitized {nulls_fixed} nulls")
+        return data
+
+    except Exception as e:
+        logger.error(f"[VOD-Fix] Could not process series info response: {e}")
+        import traceback
+        traceback.print_exc()
+        return data

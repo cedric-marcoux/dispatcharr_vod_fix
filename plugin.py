@@ -55,7 +55,7 @@ Simply place this plugin in the Dispatcharr plugins directory and restart:
 The plugin will auto-install and start working immediately.
 
 Author: Cedric Marcoux
-Version: 1.1.0
+Version: 1.3.0
 License: MIT
 """
 
@@ -149,12 +149,13 @@ class Plugin:
         # - MAJOR: Breaking changes
         # - MINOR: New features, backwards compatible
         # - PATCH: Bug fixes
-        self.version = "1.1.0"
+        self.version = "1.3.0"
 
         # Description shown in plugin details
         self.description = (
-            "Fixes VOD playback for TiviMate by properly handling multiple Range requests. "
-            "Tracks connections by client+content instead of per-request."
+            "Fixes VOD playback for TiviMate and series playback for iPlayTV. "
+            "Tracks connections by client+content instead of per-request. "
+            "Fixes series episode IDs and null values for iPlayTV compatibility."
         )
 
         # Plugin author
