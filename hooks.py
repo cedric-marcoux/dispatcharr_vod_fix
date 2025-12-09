@@ -417,9 +417,7 @@ def install_hooks() -> bool:
         return True
 
     except Exception as e:
-        logger.error(f"[VOD-Fix] Failed to install hooks: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"[VOD-Fix] Failed to install hooks: {e}")
         return False
 
 
@@ -738,26 +736,28 @@ def patched_get_m3u_profile(self, m3u_account, profile_id, session_id=None):
                         redis_client.hincrby(client_key, 'active_requests', 1)
                         redis_client.expire(client_key, SLOT_TTL_SECONDS)
 
-                    # Get current connection count for logging
+                    # Get current connection count for logging (only in DEBUG)
                     profile_connections_key = f"profile_connections:{existing_profile.id}"
                     current_connections = (
                         int(redis_client.get(profile_connections_key) or 0)
                         if redis_client else 0
                     )
 
-                    # Log slot reuse (truncate UUID for readability)
-                    logger.info(
+                    # High frequency log - slot reuse happens multiple times per VOD request
+                    logger.debug(
                         f"[VOD-Fix] Client {client_ip} reusing slot for "
                         f"{content_uuid[:8]}... - profile {slot_profile_id}, "
                         f"active: {active_requests + 1}"
                     )
 
-                    # Store context on view instance for increment/decrement patches
-                    if not hasattr(self, '_vod_fix_context'):
-                        self._vod_fix_context = {}
-                    self._vod_fix_context['client_ip'] = client_ip
-                    self._vod_fix_context['content_uuid'] = content_uuid
-                    self._vod_fix_context['reusing_slot'] = True
+                    # [DISABLED v1.4.0] Context stored here but never read elsewhere
+                    # Was intended for debugging/future use but increment/decrement
+                    # patches get context from manager instance, not view instance
+                    # if not hasattr(self, '_vod_fix_context'):
+                    #     self._vod_fix_context = {}
+                    # self._vod_fix_context['client_ip'] = client_ip
+                    # self._vod_fix_context['content_uuid'] = content_uuid
+                    # self._vod_fix_context['reusing_slot'] = True
 
                     # Return profile WITHOUT triggering capacity check
                     return (existing_profile, current_connections)
@@ -777,12 +777,12 @@ def patched_get_m3u_profile(self, m3u_account, profile_id, session_id=None):
             # Create new slot for this client+content
             create_or_update_slot(client_ip, content_uuid, profile.id, increment_active=True)
 
-            # Store context for increment/decrement patches
-            if not hasattr(self, '_vod_fix_context'):
-                self._vod_fix_context = {}
-            self._vod_fix_context['client_ip'] = client_ip
-            self._vod_fix_context['content_uuid'] = content_uuid
-            self._vod_fix_context['reusing_slot'] = False
+            # [DISABLED v1.4.0] Context never read - see comment above
+            # if not hasattr(self, '_vod_fix_context'):
+            #     self._vod_fix_context = {}
+            # self._vod_fix_context['client_ip'] = client_ip
+            # self._vod_fix_context['content_uuid'] = content_uuid
+            # self._vod_fix_context['reusing_slot'] = False
 
         elif result is None:
             # ---------------------------------------------------------------------
@@ -812,12 +812,12 @@ def patched_get_m3u_profile(self, m3u_account, profile_id, session_id=None):
                         # Create new slot for this client+content
                         create_or_update_slot(client_ip, content_uuid, profile.id, increment_active=True)
 
-                        # Store context for increment/decrement patches
-                        if not hasattr(self, '_vod_fix_context'):
-                            self._vod_fix_context = {}
-                        self._vod_fix_context['client_ip'] = client_ip
-                        self._vod_fix_context['content_uuid'] = content_uuid
-                        self._vod_fix_context['reusing_slot'] = False
+                        # [DISABLED v1.4.0] Context never read - see comment above
+                        # if not hasattr(self, '_vod_fix_context'):
+                        #     self._vod_fix_context = {}
+                        # self._vod_fix_context['client_ip'] = client_ip
+                        # self._vod_fix_context['content_uuid'] = content_uuid
+                        # self._vod_fix_context['reusing_slot'] = False
 
             except Exception as e:
                 logger.error(f"[VOD-Fix] Error checking for orphan counters: {e}")
@@ -825,9 +825,7 @@ def patched_get_m3u_profile(self, m3u_account, profile_id, session_id=None):
         return result
 
     except Exception as e:
-        logger.error(f"[VOD-Fix] Error in patched_get_m3u_profile: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"[VOD-Fix] Error in patched_get_m3u_profile: {e}")
         return _original_get_m3u_profile(self, m3u_account, profile_id, session_id)
 
 
@@ -976,7 +974,8 @@ def patched_increment_profile_connections(self, m3u_profile):
                 profile_connections_key = f"profile_connections:{m3u_profile.id}"
                 current_count = int(redis_client.get(profile_connections_key) or 0)
 
-                logger.info(
+                # High frequency log - only in DEBUG mode
+                logger.debug(
                     f"[VOD-Fix] Skipping increment for {client_ip}/{content_uuid[:8]}... "
                     f"- already counted, current: {current_count}"
                 )
@@ -1073,7 +1072,8 @@ def patched_decrement_profile_connections(self, m3u_profile_id: int):
                 return 0
         else:
             # Still have active requests - don't decrement yet
-            logger.info(
+            # High frequency log - only in DEBUG mode
+            logger.debug(
                 f"[VOD-Fix] Slot {client_ip}/{content_uuid[:8]}... "
                 f"still has {new_active} active requests"
             )
@@ -1184,9 +1184,7 @@ def patched_xc_series_stream(request, username, password, stream_id, extension):
         return HttpResponseRedirect(vod_url)
 
     except Exception as e:
-        logger.error(f"[VOD-Fix] xc_series_stream error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"[VOD-Fix] xc_series_stream error: {e}")
         return JsonResponse({"error": "Internal server error"}, status=500)
 
 
@@ -1277,7 +1275,5 @@ def patched_xc_get_series_info(request, user, series_id):
         return data
 
     except Exception as e:
-        logger.error(f"[VOD-Fix] Could not process series info response: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"[VOD-Fix] Could not process series info response: {e}")
         return data

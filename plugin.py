@@ -55,7 +55,7 @@ Simply place this plugin in the Dispatcharr plugins directory and restart:
 The plugin will auto-install and start working immediately.
 
 Author: Cedric Marcoux
-Version: 1.3.0
+Version: 1.4.0
 License: MIT
 """
 
@@ -149,7 +149,7 @@ class Plugin:
         # - MAJOR: Breaking changes
         # - MINOR: New features, backwards compatible
         # - PATCH: Bug fixes
-        self.version = "1.3.0"
+        self.version = "1.4.0"
 
         # Description shown in plugin details
         self.description = (
