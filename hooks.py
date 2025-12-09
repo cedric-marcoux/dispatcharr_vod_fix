@@ -750,15 +750,6 @@ def patched_get_m3u_profile(self, m3u_account, profile_id, session_id=None):
                         f"active: {active_requests + 1}"
                     )
 
-                    # [DISABLED v1.4.0] Context stored here but never read elsewhere
-                    # Was intended for debugging/future use but increment/decrement
-                    # patches get context from manager instance, not view instance
-                    # if not hasattr(self, '_vod_fix_context'):
-                    #     self._vod_fix_context = {}
-                    # self._vod_fix_context['client_ip'] = client_ip
-                    # self._vod_fix_context['content_uuid'] = content_uuid
-                    # self._vod_fix_context['reusing_slot'] = True
-
                     # Return profile WITHOUT triggering capacity check
                     return (existing_profile, current_connections)
 
@@ -776,13 +767,6 @@ def patched_get_m3u_profile(self, m3u_account, profile_id, session_id=None):
             profile = result[0]
             # Create new slot for this client+content
             create_or_update_slot(client_ip, content_uuid, profile.id, increment_active=True)
-
-            # [DISABLED v1.4.0] Context never read - see comment above
-            # if not hasattr(self, '_vod_fix_context'):
-            #     self._vod_fix_context = {}
-            # self._vod_fix_context['client_ip'] = client_ip
-            # self._vod_fix_context['content_uuid'] = content_uuid
-            # self._vod_fix_context['reusing_slot'] = False
 
         elif result is None:
             # ---------------------------------------------------------------------
@@ -811,13 +795,6 @@ def patched_get_m3u_profile(self, m3u_account, profile_id, session_id=None):
                         profile = result[0]
                         # Create new slot for this client+content
                         create_or_update_slot(client_ip, content_uuid, profile.id, increment_active=True)
-
-                        # [DISABLED v1.4.0] Context never read - see comment above
-                        # if not hasattr(self, '_vod_fix_context'):
-                        #     self._vod_fix_context = {}
-                        # self._vod_fix_context['client_ip'] = client_ip
-                        # self._vod_fix_context['content_uuid'] = content_uuid
-                        # self._vod_fix_context['reusing_slot'] = False
 
             except Exception as e:
                 logger.error(f"[VOD-Fix] Error checking for orphan counters: {e}")

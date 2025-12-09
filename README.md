@@ -256,14 +256,13 @@ dispatcharr_vod_fix/
 ## Version History
 
 ### 1.4.0 (2025-12-09)
-- **Code cleanup**: Commented out dead code (`_vod_fix_context` dict was stored but never read)
+- **Code cleanup**: Removed dead code (`_vod_fix_context` dict was stored but never read)
   - Context tracking was intended for debugging but increment/decrement patches get context from manager instance
-  - Code is commented with `[DISABLED v1.4.0]` tags for easy restoration if needed
 - **Optimized logging**:
   - Replaced `traceback.print_exc()` with `logger.exception()` for proper log integration
   - Changed high-frequency logs (slot reuse, skip increment, active requests) from `info` to `debug` level
   - Reduces log noise in production while keeping important events visible
-- **Verified compatibility** with Dispatcharr v0.14.0
+- **Tested with Dispatcharr v0.14.0**
 
 ### 1.3.0 (2025-12-06)
 - **Fix iPlayTV series playback crash**: iPlayTV crashed when loading episode lists due to two issues in Dispatcharr v0.13:
